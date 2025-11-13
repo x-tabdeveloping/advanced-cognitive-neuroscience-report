@@ -29,6 +29,13 @@ python scripts/source_reconstruction.py
 python scripts/sensor_space_modelling.py
 ```
 
+### Extra: Extract epochs for visualization 
+
+Required for running notebook, plot_evoked_sensors.ipynb.
+```bash
+python scripts/epoching.py
+```
+
 ## Notebooks
 
 Notebooks can be found in the `notebooks` directory and have code for plotting and interpreting results.
