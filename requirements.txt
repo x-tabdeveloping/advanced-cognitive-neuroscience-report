@@ -1,0 +1,9 @@
+mne
+scikit-learn
+numpy
+scipy
+pandas
+mord
+tqdm
+joblib
+nibabel
