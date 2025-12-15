@@ -1,0 +1,352 @@
+---
+title: "behavorial"
+output: html_document
+date: "2025-10-10"
+---
+
+# Objective and data
+
+This script analyses behavioral data from the 2025 MEG workshop for
+Advanced Cognitive Neuroscience course at the MSc. in Cognitive Science
+at Aarhus University. The purpose of the experiment was to find neural
+correlates of subjective experience. This was done using an
+forced-choice paradigm where participants had to judged whether the
+target stimuli was tilted left or right and then immediately report the
+clarity of experience using the Perceptual Awareness Scale. The four
+options of the PAS are:
+
+-1: No experience
+
+-2: A weak experience
+
+-3: An almost clear experience
+
+-4: A clear experience
+
+The contrast of the target stimuli was continuously adjusted depending
+on the number of correct and incorrect objective choices, ie the
+direction of the tilt, made by the participant to avoid ceiling and
+floor effects.
+
+In this notebook, I fit a Bayesian varying correlated slopes and
+intercepts logistic regression to investigate whether the reported
+vividness of subjective experience predicts performance. Elegantly
+skipping any worries that the our predictor is an ordinal scale. Since
+we are interested in this analysis as a sanity check of the PAS reports
+we will just treat is at an categorical variable.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse, tidybayes, brms, bayesplot, ggridges)
+```
+
+Data from each participant is loaded and returned as a single dataframe.
+Additionally, I code a column that represents whether tilt of the
+stimuli presented matches the response of participant. Additionally the
+PAS scale is converted to a ordered factor to avoid BRMS mistaking it
+for a continuous variable.
+
+```{r}
+
+
+### Might be necessary to change if running elsewhere ### 
+path <- "behavorial_data/"
+
+# read in all .csvs and megerge
+df <- list.files(path, pattern = "\\.csv$", full.names = TRUE) %>%
+  set_names() %>% 
+  map_dfr(read_csv, .id = "id") %>%
+  mutate(id = basename(id) %>% tools::file_path_sans_ext())
+
+#wrangle a bit
+df <- df %>% 
+  mutate(correct_answer = if_else(target_type == objective_response, 1, 0),
+         subjective_response = as.factor(subjective_response))
+df$subjective_response <- factor(df$subjective_response, ordered = T)
+df$target_contrast_z <- (df$target_contrast - mean(df$target_contrast)) / sd(df$target_contrast)
+
+```
+
+# Choosing priors
+
+I will fit a hierarchical logistic regression predicting correct vs
+incorrect using reported PAS. For this I suggest the following priors.
+It should be noted that priors are set in log-odds, and these behave a
+little counter-intuively. Since we are doing a logit transform, wide
+priors in log_odds would therefore bias toward estimating large effect
+sizes, since the further we move away from 0 zero log-odds, density in
+probability space will accumulate near 0 and 1.
+
+```{r}
+
+prior_m <- c(
+  #  fixed effects
+  set_prior("normal(0, .5)", class = "b", coef = "subjective_response1"),
+  set_prior("normal(0, .5)", class = "b", coef = "subjective_response2"),
+  set_prior("normal(0, .5)", class = "b", coef = "subjective_response3"),
+  set_prior("normal(0, .5)", class = "b", coef = "subjective_response4"),
+
+  # group effects
+  set_prior("normal(0, .5)", class = "sd", group = "subject", coef = "Intercept"),
+  set_prior("normal(0, .5)", class = "sd", group = "subject", coef = "subjective_response.C"),
+  set_prior("normal(0, .5)", class = "sd", group = "subject", coef = "subjective_response.L"),
+  set_prior("normal(0, .5)", class = "sd", group = "subject", coef = "subjective_response.Q"),
+
+  # correlation prior for subject random effects
+  set_prior("lkj(2)", class = "cor", group = "subject")
+)
+
+fit_prior <- brm(formula = correct_answer ~ 0 + subjective_response + (subjective_response |subject),
+          data = df,
+          family = bernoulli(),
+          cores = 4,
+          iter =  4000,
+          file = "brms_model",
+          file_refit = "always",
+          prior = prior_m,
+          sample_prior = "only"
+          )
+  
+```
+
+These yield the following prior estimates for the population level
+effects. They are fairly constrained towards estimating zero log-odds.
+But choosing such a conservative prior is done to ensure that the
+results convincingly show that PAS and performance correspond in the way
+we predict, ie. that increasing PAS scores lead to better task
+performance.
+
+If one wanted to fit an estimate of the relation between PAS and task
+performance that would generalize better to future data, one should
+probably redo these priors. For example, by not centering all four PAS
+predictors on zero log-odds, assigning lenient with larger effects and
+substantially reducing prior probability to below chance performance
+also seems reasonable. I eyeballed some sensitivity testing in which
+less informative priors did find meaningfully larger effects.
+
+```{r}
+pop_plot <- mcmc_areas_ridges(fit_prior, regex_pars = "b_subj*")
+pop_plot + scale_y_discrete(
+  labels = c("b_subjective_response1" = "PAS 1",
+             "b_subjective_response2" = "PAS 2",
+             "b_subjective_response3" = "PAS 3",
+             "b_subjective_response4" = "PAS 4")
+) +
+  xlab("Population Level Effect (Log-odds)")
+
+
+```
+
+Then I sample prior predicted probabilities for a participant making the
+correct response.
+
+```{r}
+#make new df
+newdata <- tibble(subjective_response = rep(c(1,2,3,4), length(unique(df$subject))), subject = rep(unique(df$subject), each = 4), trial_number = rep(mean(df$trial_number)), length(unique(df$subject)))
+
+#fit predicitons and turn to tidy
+fitted_vals = as.data.frame(fitted(fit_prior, newdata, summary = F, allow_new_levels = T)) %>% 
+  pivot_longer(everything(), values_to = "prob")
+
+#create columns
+fitted_vals$subject <- rep(as.factor(unique(df$subject)), each = 4, 8000)
+fitted_vals$PAS <- rep(as.factor(c(1,2,3,4)), nrow(fitted_vals) / 4)
+
+#filter down to only one participant
+fitted_vals <- filter(fitted_vals, subject == "0167")
+
+#make plot
+ggplot(fitted_vals, aes(x=prob, fill = PAS)) +
+  geom_density(alpha = .8) +
+  facet_wrap(~PAS) +
+  scale_fill_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+  scale_color_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+  theme_classic() +
+  theme(
+  axis.ticks.y = element_blank(),
+  axis.text.y  = element_blank()
+)+
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept = .5, linetype = "dotted") +
+
+  guides(fill = guide_legend(direction = "horizontal")) +
+  xlab("P(Correct | PAS)") + 
+  scale_x_continuous(limits = c(0, 1)) 
+
+#save it
+ggsave("subject_wise_prior_density_each_pas.png")
+
+
+```
+
+# Conditioning on data
+
+Satisfied with that the prior, the model is then conditioned on data
+
+```{r}
+fit <- brm(formula = correct_answer ~ 0 + subjective_response + (subjective_response |subject) ,
+          data = df,
+          family = bernoulli(),
+          cores = 4,
+          iter =  4000,
+          control = list(adapt_delta = .90),
+          file = "brms_model",
+          file_refit = "on_change",
+          prior = prior_m
+          )
+```
+
+Checking if chains are behaving. Remember to hit \<enter\> to generate
+plots for BRMS fit plot.s
+
+```{r}
+plot(fit)
+```
+
+The CIs are plotted for all population effects coefficients and summary
+is printed. Rhat and n_eff look fine.
+
+```{r}
+
+summary_fit <- summary(fit)
+color_scheme_set("blue")
+
+#make plot of pop level effects
+pop_plot <- mcmc_areas(fit, regex_pars = "b_subj*", prob_outer = 1, area_method = "equal area")
+pop_plot + scale_y_discrete(
+  labels = c("b_subjective_response1" = "PAS 1",
+             "b_subjective_response2" = "PAS 2",
+             "b_subjective_response3" = "PAS 3",
+             "b_subjective_response4" = "PAS 4")) +
+  xlab("Population Level Effect (Log-odds)") 
+
+ggsave("ridgeplot.jpeg")
+summary_fit
+
+```
+
+Making a nice table of fixed effects.
+
+```{r}
+summary_fit$fixed %>% 
+  mutate(PAS = c("PAS 1", "PAS 2", "PAS 3", "PAS 4")) %>% 
+  select(c("Estimate", "Est.Error", "l-95% CI", "u-95% CI")) %>% 
+  knitr::kable()
+
+
+
+```
+
+Fit probabilities for each subject at each pas and plot it by subject.
+Also includes a version with the observed accuracy for each pas is
+overlaid as a vertical line. This is done as posterior predictive check,
+to see if the model adequately could describe the observed data. Some
+participants didn't use all response categories, and some only used
+certain very few times, and the observed accuracy therefore probably
+isn't reliable. See later histogram of response patterns.
+
+```{r}
+
+#predict the data and wranlge
+newdata <- tibble(subjective_response = rep(c(1,2,3,4), length(unique(df$subject))), subject = rep(unique(df$subject), each = 4), trial_number = rep(mean(df$trial_number)), length(unique(df$subject)))
+
+fitted_vals = as.data.frame(fitted(fit, newdata, summary = F, allow_new_levels = T,)) %>% 
+  pivot_longer(everything(), values_to = "prob")
+
+fitted_vals$subject <- rep(as.factor(unique(df$subject)), each = 4, 8000)
+fitted_vals$PAS <- rep(as.factor(c(1,2,3,4)), nrow(fitted_vals) / 4)
+
+# get observed means
+subject_means_all_pas <- df %>% 
+  group_by(subject, subjective_response) %>%
+  summarise(mean_correct = mean(correct_answer), count = n()) %>% 
+  mutate(PAS = subjective_response)
+
+#make plot
+ggplot(fitted_vals, aes(x=prob, fill = PAS)) +
+  geom_density(alpha = .8) +
+  facet_wrap(~subject) +
+
+  scale_fill_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+  scale_color_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+  theme_classic() +
+  theme(
+  axis.ticks.y = element_blank(),
+  axis.text.y  = element_blank()
+)+
+  geom_vline(xintercept = .5, linetype = "dotted") +
+  theme(legend.position = c(1.01, 0.05), 
+        legend.justification = c("right", "bottom")) +
+  guides(fill = guide_legend(direction = "horizontal")) +
+  xlab("P(Correct | PAS)") + 
+  scale_x_continuous(limits = c(0.3, 1)) 
+
+#save plot 
+ggsave("subject_wise_density_each_pas.png")
+
+#make plot aign with overlaid means
+ggplot(fitted_vals, aes(x=prob, fill = PAS)) +
+  geom_density(alpha = .8) +
+  facet_wrap(~subject) +
+  geom_vline(data = subject_means_all_pas, aes(xintercept = mean_correct, color = PAS )) + # add bars for observed means
+  scale_fill_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+  scale_color_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+  theme_classic() +
+  theme(
+  axis.ticks.y = element_blank(),
+  axis.text.y  = element_blank()
+)+
+  geom_vline(xintercept = .5, linetype = "dotted") +
+  theme(legend.position = c(1.01, 0.05), 
+        legend.justification = c("right", "bottom")) +
+  guides(fill = guide_legend(direction = "horizontal")) +
+  xlab("P(Correct | PAS)") + 
+  scale_x_continuous(limits = c(0.3, 1)) 
+
+
+```
+
+```{r}
+ggplot(subject_means_all_pas, aes(x = PAS, y = count, fill = PAS )) +
+  geom_col(color = "black") +
+  labs(x = "PAS level", y = "Number of responses") +
+  theme_classiRc() +
+  scale_fill_manual(values = c("#E0F2FF", "#99CCFF", "#3388FF", "#0044CC")) +
+    theme(legend.position = c(1.01, 0.05),  # (x, y) in relative coordinates
+        legend.justification = c("right", "bottom")) +
+    guides(fill = guide_legend(direction = "horizontal")) +
+  xlab("") +
+  facet_wrap(~subject) 
+
+```
+
+Using the model to check the level of purported supraliminal perception,
+ie. performance above the mean.
+
+```{r}
+#sample log odds again
+newdata <- tibble(subjective_response = rep(c(1,2,3,4), length(unique(df$subject))), subject = rep(unique(df$subject), each = 4))
+
+fitted_vals = as.data.frame(fitted(fit, newdata, summary = F)) %>% 
+  pivot_longer(everything(), values_to = "prob")
+
+fitted_vals$subject <- rep(as.factor(unique(df$subject)), each = 4, 8000)
+fitted_vals$PAS <- rep(as.factor(c(1,2,3,4)), nrow(fitted_vals) / 4)
+
+# turn them into probs
+fitted_vals <- fitted_vals %>% 
+  mutate(logodds = qlogis(prob))
+
+
+#display the model's probs of answering above chance given PAS=1 per subject
+fitted_vals %>% 
+  group_by(subject, PAS) %>% 
+  summarize(estimated_prob_of_answering_above_chance = mean(prob >.5)) %>%
+  filter(PAS == 1) %>% 
+  arrange(desc(estimated_prob_of_answering_above_chance))
+
+
+```
